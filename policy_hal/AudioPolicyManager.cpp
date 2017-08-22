@@ -714,39 +714,50 @@ void AudioPolicyManagerCustom::setPhoneState(audio_mode_t state)
         mvoice_call_state = state;
         if (prop_rec_enabled) {
             //Close all active inputs
-            audio_io_handle_t activeInput = mInputs.getActiveInput();
-            if (activeInput != 0) {
-               sp<AudioInputDescriptor> activeDesc = mInputs.valueFor(activeInput);
-               switch(activeDesc->mInputSource) {
-                   case AUDIO_SOURCE_VOICE_UPLINK:
-                   case AUDIO_SOURCE_VOICE_DOWNLINK:
-                   case AUDIO_SOURCE_VOICE_CALL:
-                       ALOGD("voice_conc:FOUND active input during call active: %d",activeDesc->mInputSource);
-                   break;
 
-                   case  AUDIO_SOURCE_VOICE_COMMUNICATION:
-                        if(prop_voip_enabled) {
-                            ALOGD("voice_conc:CLOSING VoIP input source on call setup :%d ",activeDesc->mInputSource);
-                            stopInput(activeInput, activeDesc->mSessions.itemAt(0));
-                            releaseInput(activeInput, activeDesc->mSessions.itemAt(0));
-                        }
-                   break;
+            Vector<sp <AudioInputDescriptor> > activeInputs = mInputs.getActiveInputs();
+            for (size_t i = 0; i < activeInputs.size(); i++) {
+                if (activeInputs[i] != 0) {
+                    sp<AudioInputDescriptor> activeDesc = activeInputs[i];
+                    switch(activeDesc->inputSource()) {
+                        case AUDIO_SOURCE_VOICE_UPLINK:
+                        case AUDIO_SOURCE_VOICE_DOWNLINK:
+                        case AUDIO_SOURCE_VOICE_CALL:
+                            ALOGD("voice_conc:FOUND active input during call active: %d",activeDesc->inputSource());
+                        break;
 
-                   default:
-                       ALOGD("voice_conc:CLOSING input on call setup  for inputSource: %d",activeDesc->mInputSource);
-                       stopInput(activeInput, activeDesc->mSessions.itemAt(0));
-                       releaseInput(activeInput, activeDesc->mSessions.itemAt(0));
-                   break;
-               }
-           }
+                        case  AUDIO_SOURCE_VOICE_COMMUNICATION:
+                             if(prop_voip_enabled) {
+                                 ALOGD("voice_conc:CLOSING VoIP input source on call setup :%d ",activeDesc->inputSource());
+                                 AudioSessionCollection activeSessions = activeDesc->getAudioSessions(true /*activeOnly*/);
+                                 audio_session_t activeSession = activeSessions.keyAt(0);
+                                 stopInput(activeDesc->mIoHandle, activeSession);
+                                 releaseInput(activeDesc->mIoHandle, activeSession);
+                             }
+                        break;
+
+                        default:
+                            ALOGD("voice_conc:CLOSING input on call setup  for inputSource: %d",activeDesc->inputSource());
+                            AudioSessionCollection activeSessions = activeDesc->getAudioSessions(true /* activeOnly */);
+                            audio_session_t activeSession = activeSessions.keyAt(0);
+                            stopInput(activeDesc->mIoHandle, activeSession);
+                            releaseInput(activeDesc->mIoHandle, activeSession);
+                        break;
+                    }
+                }
+            }
         } else if (prop_voip_enabled) {
-            audio_io_handle_t activeInput = mInputs.getActiveInput();
-            if (activeInput != 0) {
-                sp<AudioInputDescriptor> activeDesc = mInputs.valueFor(activeInput);
-                if (AUDIO_SOURCE_VOICE_COMMUNICATION == activeDesc->mInputSource) {
-                    ALOGD("voice_conc:CLOSING VoIP on call setup : %d",activeDesc->mInputSource);
-                    stopInput(activeInput, activeDesc->mSessions.itemAt(0));
-                    releaseInput(activeInput, activeDesc->mSessions.itemAt(0));
+            Vector<sp <AudioInputDescriptor> > activeInputs = mInputs.getActiveInputs();
+            for (size_t i = 0; i < activeInputs.size(); i++) {
+                if (activeInputs[i] != 0) {
+                    sp<AudioInputDescriptor> activeDesc = activeInputs[i];
+                    if (AUDIO_SOURCE_VOICE_COMMUNICATION == activeDesc->inputSource()) {
+                        ALOGD("voice_conc:CLOSING VoIP on call setup : %d",activeDesc->inputSource());
+                        AudioSessionCollection activeSessions = activeDesc->getAudioSessions(true /* activeOnly */);
+                        audio_session_t activeSession = activeSessions.keyAt(0);
+                        stopInput(activeDesc->mIoHandle, activeSession);
+                        releaseInput(activeDesc->mIoHandle, activeSession);
+                    }
                 }
             }
         }
@@ -1016,16 +1027,17 @@ void AudioPolicyManagerCustom::setForceUse(audio_policy_force_use_t usage,
         }
     }
 
-    Vector<sp <AudioInputDescriptor>> activeInputs = mInputs.getActiveInputs();
+    Vector<sp <AudioInputDescriptor> > activeInputs = mInputs.getActiveInputs();
     for (size_t i = 0; i < activeInputs.size(); i++) {
-        sp<AudioInputDescriptor> activeDesc = activeInputs[i];
-        audio_devices_t newDevice = getNewInputDevice(activeDesc);
-        // Force new input selection if the new device can not be reached via current input
-        if (activeDesc->mProfile->getSupportedDevices().types()
-                & (newDevice & ~AUDIO_DEVICE_BIT_IN)) {
-            setInputDevice(activeDesc->mIoHandle, newDevice);
-        } else {
-            closeInput(activeDesc->mIoHandle);
+        if (activeInputs[i]->mIoHandle != 0) {
+            sp<AudioInputDescriptor> activeDesc = activeInputs[i];
+            audio_devices_t newDevice = getNewInputDevice(activeDesc);
+            // Force new input selection if the new device can not be reached via current input
+            if (activeDesc->mProfile->getSupportedDevices().types() & (newDevice & ~AUDIO_DEVICE_BIT_IN)) {
+                setInputDevice(activeDesc->mIoHandle, newDevice);
+            } else {
+                closeInput(activeDesc->mIoHandle);
+            }
         }
     }
 }
@@ -1416,11 +1428,18 @@ status_t AudioPolicyManagerCustom::getOutputForAttr(const audio_attributes_t *at
         offloadInfo = &tOffloadInfo;
     }
 
+    audio_port_handle_t portId = AUDIO_PORT_HANDLE_NONE;
+
+    audio_config_t config = AUDIO_CONFIG_INITIALIZER;
+    config.sample_rate = (uint32_t)samplingRate;
+    config.channel_mask = (audio_channel_mask_t)channelMask;
+    config.format = format;
+    config.offload_info = *offloadInfo;
+
     return AudioPolicyManager::getOutputForAttr(attr, output, session, stream,
-                                                (uid_t)uid, (uint32_t)samplingRate,
-                                                format, (audio_channel_mask_t)channelMask,
-                                                flags, (audio_port_handle_t)selectedDeviceId,
-                                                offloadInfo);
+                                                (uid_t)uid, &config, flags,
+                                                (audio_port_handle_t)selectedDeviceId,
+                                                &portId);
 }
 
 audio_io_handle_t AudioPolicyManagerCustom::getOutputForDevice(
@@ -1961,16 +1980,22 @@ status_t AudioPolicyManagerCustom::getInputForAttr(const audio_attributes_t *att
 
 #endif
 
+    audio_port_handle_t portId = AUDIO_PORT_HANDLE_NONE;
+
+    audio_config_base_t config;
+    config.sample_rate = (uint32_t)samplingRate;
+    config.channel_mask = (audio_channel_mask_t)channelMask;
+    config.format = format;
+
     return AudioPolicyManager::getInputForAttr(attr,
                                                input,
                                                session,
                                                uid,
-                                               samplingRate,
-                                               format,
-                                               channelMask,
+                                               &config,
                                                flags,
                                                selectedDeviceId,
-                                               inputType);
+                                               inputType,
+                                               &portId);
 }
 
 status_t AudioPolicyManagerCustom::startInput(audio_io_handle_t input,
@@ -1994,27 +2019,29 @@ status_t AudioPolicyManagerCustom::startInput(audio_io_handle_t input,
     if (!is_virtual_input_device(inputDesc->mDevice)) {
 
         // for a non-virtual input device, check if there is another (non-virtual) active input
-        audio_io_handle_t activeInput = mInputs.getActiveInput();
-        if (activeInput != 0 && activeInput != input) {
+        Vector<sp <AudioInputDescriptor> > activeInputs = mInputs.getActiveInputs();
+        for (size_t i = 0; i < activeInputs.size(); i++) {
+            if (activeInputs[i]->mIoHandle != 0 && activeInputs[i]->mIoHandle != input) {
 
-            // If the already active input uses AUDIO_SOURCE_HOTWORD then it is closed,
-            // otherwise the active input continues and the new input cannot be started.
-            sp<AudioInputDescriptor> activeDesc = mInputs.valueFor(activeInput);
-            if ((activeDesc->inputSource() == AUDIO_SOURCE_HOTWORD) &&
-                    !activeDesc->hasPreemptedSession(session)) {
-                ALOGW("startInput(%d) preempting low-priority input %d", input, activeInput);
-                //FIXME: consider all active sessions
-                AudioSessionCollection activeSessions = activeDesc->getActiveAudioSessions();
-                audio_session_t activeSession = activeSessions.keyAt(0);
-                SortedVector<audio_session_t> sessions =
-                                           activeDesc->getPreemptedSessions();
-                sessions.add(activeSession);
-                inputDesc->setPreemptedSessions(sessions);
-                stopInput(activeInput, activeSession);
-                releaseInput(activeInput, activeSession);
-            } else {
-                ALOGE("startInput(%d) failed: other input %d already started", input, activeInput);
-                return INVALID_OPERATION;
+                // If the already active input uses AUDIO_SOURCE_HOTWORD then it is closed,
+                // otherwise the active input continues and the new input cannot be started.
+                sp<AudioInputDescriptor> activeDesc = activeInputs[i];
+                if ((activeDesc->inputSource() == AUDIO_SOURCE_HOTWORD) &&
+                        !activeDesc->hasPreemptedSession(session)) {
+                    ALOGW("startInput(%d) preempting low-priority input %d", input, activeDesc->mIoHandle);
+                    //FIXME: consider all active sessions
+                    AudioSessionCollection activeSessions = activeDesc->getAudioSessions(true /* activeOnly */);
+                    audio_session_t activeSession = activeSessions.keyAt(0);
+                    SortedVector<audio_session_t> sessions =
+                                               activeDesc->getPreemptedSessions();
+                    sessions.add(activeSession);
+                    inputDesc->setPreemptedSessions(sessions);
+                    stopInput(activeDesc->mIoHandle, activeSession);
+                    releaseInput(activeDesc->mIoHandle, activeSession);
+                } else {
+                    ALOGE("startInput(%d) failed: other input %d already started", input, activeDesc->mIoHandle);
+                    return INVALID_OPERATION;
+                }
             }
         }
         // Do not allow capture if an active voice call is using a software patch and
@@ -2087,7 +2114,7 @@ status_t AudioPolicyManagerCustom::startInput(audio_io_handle_t input,
 
         // indicate active capture to sound trigger service if starting capture from a mic on
         // primary HW module
-        audio_devices_t device = getNewInputDevice(input);
+        audio_devices_t device = getNewInputDevice(inputDesc);
         audio_devices_t primaryInputDevices = availablePrimaryInputDevices();
         if (((device & primaryInputDevices & ~AUDIO_DEVICE_BIT_IN) != 0) &&
                 mInputs.activeInputsCountOnDevices(primaryInputDevices) == 0) {
